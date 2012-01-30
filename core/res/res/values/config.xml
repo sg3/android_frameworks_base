@@ -552,7 +552,7 @@
     <integer name="config_datause_throttle_kbitsps">300</integer>
 
     <!-- The default iface on which to monitor data use -->
-    <string name="config_datause_iface">rmnet0</string>
+    <string name="config_datause_iface">pdp0</string>
 
     <!-- The default reduced-datarate notification mask -->
     <!-- 2 means give warning -->
@@ -752,6 +752,6 @@
     <!-- LUN file to be used by legacy USB manager.
          The existence of this file will be used to determine in the
          legacy USB manager should be started. -->
-    <string name="config_legacyUmsLunFile">/sys/devices/platform/usb_mass_storage/lun0/file</string>
+    <string name="config_legacyUmsLunFile">/sys/devices/platform/s3c-usbgadget/gadget/lun0/file</string>
 
 </resources>
