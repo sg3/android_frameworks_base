@@ -31,26 +31,26 @@ import com.android.internal.telephony.RILConstants;
 import com.android.internal.telephony.SmsResponse;
 import com.android.internal.telephony.cdma.CdmaCallWaitingNotification;
 import com.android.internal.telephony.cdma.CdmaInformationRecords;
+import com.android.internal.telephony.cdma.CdmaInformationRecords.CdmaSignalInfoRec;
+import com.android.internal.telephony.cdma.SignalToneUtil;
 
 import android.util.Log;
 
 public class SamsungRIL extends RIL implements CommandsInterface {
 
-    private boolean mSignalbarCount;
-    private boolean mIsSamsungCdma;
+    private boolean mSignalbarCount = SystemProperties.getInt("ro.telephony.sends_barcount", 0) == 1 ? true : false;
+    private boolean mIsSamsungCdma = SystemProperties.getBoolean("ro.ril.samsung_cdma", false);
 
     public SamsungRIL(Context context, int networkMode, int cdmaSubscription) {
         super(context, networkMode, cdmaSubscription);
-
-        mSignalbarCount =
-            SystemProperties.getInt("ro.telephony.sends_barcount", 0) == 1 ? true : false;
-        mIsSamsungCdma = SystemProperties.getBoolean("ro.ril.samsung_cdma", false);
     }
 
     //SAMSUNG SGS STATES
     static final int RIL_UNSOL_STK_SEND_SMS_RESULT = 11002;
     static final int RIL_UNSOL_O2_HOME_ZONE_INFO = 11007;
     static final int RIL_UNSOL_DEVICE_READY_NOTI = 11008;
+    static final int RIL_UNSOL_GPS_NOTI = 11009;
+    static final int RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST_3 = 11010;
     static final int RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST_2 = 11011;
     static final int RIL_UNSOL_HSDPA_STATE_CHANGED = 11016;
     static final int RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST = 11012;
@@ -124,9 +124,9 @@ public class SamsungRIL extends RIL implements CommandsInterface {
             case RIL_REQUEST_SWITCH_WAITING_OR_HOLDING_AND_ACTIVE: ret =  responseVoid(p); break;
             case RIL_REQUEST_CONFERENCE: ret =  responseVoid(p); break;
             case RIL_REQUEST_UDUB: ret =  responseVoid(p); break;
-            case RIL_REQUEST_LAST_CALL_FAIL_CAUSE: ret =  responseInts(p); break;
+            case RIL_REQUEST_LAST_CALL_FAIL_CAUSE: ret =  responseLastCallFailCause(p); break;
             case RIL_REQUEST_SIGNAL_STRENGTH: ret =  responseSignalStrength(p); break;
-            case RIL_REQUEST_VOICE_REGISTRATION_STATE: ret =  responseStrings(p); break;
+            case RIL_REQUEST_VOICE_REGISTRATION_STATE: ret =  responseVoiceRegistrationState(p); break;
             case RIL_REQUEST_DATA_REGISTRATION_STATE: ret =  responseStrings(p); break;
             case RIL_REQUEST_OPERATOR: ret =  responseStrings(p); break;
             case RIL_REQUEST_RADIO_POWER: ret =  responseVoid(p); break;
@@ -201,7 +201,7 @@ public class SamsungRIL extends RIL implements CommandsInterface {
             case RIL_REQUEST_CDMA_SET_BROADCAST_CONFIG: ret =  responseVoid(p); break;
             case RIL_REQUEST_CDMA_BROADCAST_ACTIVATION: ret =  responseVoid(p); break;
             case RIL_REQUEST_CDMA_VALIDATE_AND_WRITE_AKEY: ret =  responseVoid(p); break;
-            case RIL_REQUEST_CDMA_SUBSCRIPTION: ret =  responseStrings(p); break;
+            case RIL_REQUEST_CDMA_SUBSCRIPTION: ret =  responseCdmaSubscription(p); break;
             case RIL_REQUEST_CDMA_WRITE_SMS_TO_RUIM: ret =  responseInts(p); break;
             case RIL_REQUEST_CDMA_DELETE_SMS_ON_RUIM: ret =  responseVoid(p); break;
             case RIL_REQUEST_DEVICE_IDENTITY: ret =  responseStrings(p); break;
@@ -266,7 +266,7 @@ public class SamsungRIL extends RIL implements CommandsInterface {
     public void
     dial(String address, int clirMode, UUSInfo uusInfo, Message result) {
         RILRequest rr;
-        if (PhoneNumberUtils.isEmergencyNumber(address)) {
+        if (!mIsSamsungCdma && PhoneNumberUtils.isEmergencyNumber(address)) {
             Log.v(LOG_TAG, "Emergency dial: " + address);
             rr = RILRequest.obtain(RIL_REQUEST_DIAL_EMERGENCY, result);
             rr.mp.writeString(address + "/");
@@ -338,16 +338,18 @@ public class SamsungRIL extends RIL implements CommandsInterface {
         case RIL_UNSOL_OEM_HOOK_RAW: ret = responseRaw(p); break;
         case RIL_UNSOL_RINGBACK_TONE: ret = responseInts(p); break;
         case RIL_UNSOL_RESEND_INCALL_MUTE: ret = responseVoid(p); break;
-        case RIL_UNSOL_HSDPA_STATE_CHANGED: ret = responseVoid(p); break;
+        case RIL_UNSOL_HSDPA_STATE_CHANGED: ret = responseInts(p); break;
 
         //fixing anoying Exceptions caused by the new Samsung states
         //FIXME figure out what the states mean an what data is in the parcel
 
         case RIL_UNSOL_O2_HOME_ZONE_INFO: ret = responseVoid(p); break;
-        case RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST: ret = responseVoid(p); break;
         case RIL_UNSOL_STK_SEND_SMS_RESULT: ret = responseVoid(p); break;
         case RIL_UNSOL_DEVICE_READY_NOTI: ret = responseVoid(p); break;
+        case RIL_UNSOL_GPS_NOTI: ret = responseVoid(p); break; // Ignored in TW RIL.
+        case RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST: ret = responseVoid(p); break;
         case RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST_2: ret = responseVoid(p); break;
+        case RIL_UNSOL_SAMSUNG_UNKNOWN_MAGIC_REQUEST_3: ret = responseVoid(p); break;
 
         default:
             throw new RuntimeException("Unrecognized unsol response: " + response);
@@ -375,8 +377,21 @@ public class SamsungRIL extends RIL implements CommandsInterface {
         case RIL_UNSOL_HSDPA_STATE_CHANGED:
             if (RILJ_LOGD) unsljLog(response);
 
-            mVoiceNetworkStateRegistrants
-            .notifyRegistrants(new AsyncResult(null, null, null));
+            boolean newHsdpa = ((int[])ret)[0] == 1;
+            String curState = SystemProperties.get(TelephonyProperties.PROPERTY_DATA_NETWORK_TYPE);
+            boolean curHsdpa = false;
+
+            if (curState.equals("HSDPA:9")) {
+                curHsdpa = true;
+            } else if (!curState.equals("UMTS:3")) {
+                // Don't send poll request if not on 3g
+                break;
+            }
+
+            if (curHsdpa != newHsdpa) {
+                mVoiceNetworkStateRegistrants
+                    .notifyRegistrants(new AsyncResult(null, null, null));
+            }
             break;
 
         case RIL_UNSOL_RESPONSE_VOICE_NETWORK_STATE_CHANGED:
@@ -482,9 +497,6 @@ public class SamsungRIL extends RIL implements CommandsInterface {
             break;
         case RIL_UNSOL_DATA_CALL_LIST_CHANGED:
             if (RILJ_LOGD) unsljLogRet(response, ret);
-
-            if ("IP".equals(((ArrayList<DataCallState>)ret).get(0).type))
-                break;
 
             mDataNetworkStateRegistrants.notifyRegistrants(new AsyncResult(null, ret, null));
             break;
@@ -769,6 +781,21 @@ public class SamsungRIL extends RIL implements CommandsInterface {
         return response;
     }
 
+    protected Object
+    responseLastCallFailCause(Parcel p) {
+        int response[] = (int[])responseInts(p);
+
+        if (mIsSamsungCdma && response.length > 0 &&
+            response[0] == com.android.internal.telephony.cdma.CallFailCause.ERROR_UNSPECIFIED) {
+
+            // Far-end hangup returns ERROR_UNSPECIFIED, which shows "Call Lost" dialog.
+            Log.d(LOG_TAG, "Overriding ERROR_UNSPECIFIED fail cause with NORMAL_CLEARING.");
+            response[0] = com.android.internal.telephony.cdma.CallFailCause.NORMAL_CLEARING;
+        }
+
+        return response;
+    }
+
     @Override
     protected Object
     responseSignalStrength(Parcel p) {
@@ -777,17 +804,22 @@ public class SamsungRIL extends RIL implements CommandsInterface {
 
         /* TODO: Add SignalStrength class to match RIL_SignalStrength */
         response = new int[numInts];
-        for (int i = 0 ; i < numInts ; i++) {
-            if (i > 6 && i < 12) {
-                response[i] = -1;
-            } else {
-                response[i] = p.readInt();
-            }
+        for (int i = 0 ; i < 7 ; i++) {
+            response[i] = p.readInt();
         }
+        // SamsungRIL is a v3 RIL, fill the rest with -1
+        for (int i = 7; i < numInts; i++) {
+            response[i] = -1;
+        }
+
+        if (mIsSamsungCdma)
+            // Framework takes care of the rest for us.
+            return response;
 
         /* Matching Samsung signal strength to asu.
 		   Method taken from Samsungs cdma/gsmSignalStateTracker */
-        if(mSignalbarCount) {
+        if(mSignalbarCount)
+        {
             //Samsung sends the count of bars that should be displayed instead of
             //a real signal strength
             response[0] = ((response[0] & 0xFF00) >> 8) * 3; //gsmDbm
@@ -801,6 +833,20 @@ public class SamsungRIL extends RIL implements CommandsInterface {
         response[5] = (response[5] < 0)?-1:-response[5]; //evdoEcio
         if(response[6] < 0 || response[6] > 8)
             response[6] = -1;
+
+        return response;
+    }
+
+    protected Object
+    responseVoiceRegistrationState(Parcel p) {
+        String response[] = (String[])responseStrings(p);
+
+        if (mIsSamsungCdma && response.length > 6) {
+            // These values are provided in hex, convert to dec.
+            response[4] = Integer.toString(Integer.parseInt(response[4], 16)); // baseStationId
+            response[5] = Integer.toString(Integer.parseInt(response[5], 16)); // baseStationLatitude
+            response[6] = Integer.toString(Integer.parseInt(response[6], 16)); // baseStationLongitude
+        }
 
         return response;
     }
@@ -826,201 +872,160 @@ public class SamsungRIL extends RIL implements CommandsInterface {
 
         if (strings.length >= 2) {
             dataCall.cid = Integer.parseInt(strings[0]);
-            dataCall.ifname = strings[1];
 
-            if (strings.length >= 3) {
-                dataCall.addresses = strings[2].split(" ");
+            if (mIsSamsungCdma) {
+                // We're responsible for starting/stopping the pppd_cdma service.
+                if (!startPppdCdmaService(strings[1])) {
+                    // pppd_cdma service didn't respond timely.
+                    dataCall.status = FailCause.ERROR_UNSPECIFIED.getErrorCode();
+                    return dataCall;
+                }
+
+                // pppd_cdma service responded, pull network parameters set by ip-up script.
+                dataCall.ifname = SystemProperties.get("net.cdma.ppp.interface");
+                String   ifprop = "net." + dataCall.ifname;
+
+                dataCall.addresses = new String[] {SystemProperties.get(ifprop + ".local-ip")};
+                dataCall.gateways  = new String[] {SystemProperties.get(ifprop + ".remote-ip")};
+                dataCall.dnses     = new String[] {SystemProperties.get(ifprop + ".dns1"),
+                                                   SystemProperties.get(ifprop + ".dns2")};
+            } else {
+                dataCall.ifname = strings[1];
+
+                if (strings.length >= 3) {
+                    dataCall.addresses = strings[2].split(" ");
+                }
             }
         } else {
+            if (mIsSamsungCdma) {
+                // On rare occasion the pppd_cdma service is left active from a stale
+                // session, causing the data call setup to fail.  Make sure that pppd_cdma
+                // is stopped now, so that the next setup attempt may succeed.
+                Log.d(LOG_TAG, "Set ril.cdma.data_state=0 to make sure pppd_cdma is stopped.");
+                SystemProperties.set("ril.cdma.data_state", "0");
+            }
+
             dataCall.status = FailCause.ERROR_UNSPECIFIED.getErrorCode(); // Who knows?
         }
 
         return dataCall;
     }
 
-    @Override
-    protected Object
-    responseDataCallList(Parcel p) {
-        ArrayList<DataCallState> response;
-        int ver = 3;
-        int num = p.readInt();
-        riljLog("responseDataCallList ver=" + ver + " num=" + num);
+    private boolean startPppdCdmaService(String ttyname) {
+        SystemProperties.set("net.cdma.datalinkinterface", ttyname);
 
-        response = new ArrayList<DataCallState>(num);
-        for (int i = 0; i < num; i++) {
-            response.add(getDataCallState(p, ver));
+        // Connecting: Set ril.cdma.data_state=1 to (re)start pppd_cdma service,
+        // which responds by setting ril.cdma.data_state=2 once connection is up.
+        SystemProperties.set("ril.cdma.data_state", "1");
+        Log.d(LOG_TAG, "Set ril.cdma.data_state=1, waiting for ril.cdma.data_state=2.");
+
+        // Typically takes < 200 ms on my Epic, so sleep in 100 ms intervals.
+        for (int i = 0; i < 10; i++) {
+            try {Thread.sleep(100);} catch (InterruptedException e) {}
+
+            if (SystemProperties.getInt("ril.cdma.data_state", 1) == 2) {
+                Log.d(LOG_TAG, "Got ril.cdma.data_state=2, connected.");
+                return true;
+            }
+        }
+
+        // Taking > 1 s here, try up to 10 s, which is hopefully long enough.
+        for (int i = 1; i < 10; i++) {
+            try {Thread.sleep(1000);} catch (InterruptedException e) {}
+
+            if (SystemProperties.getInt("ril.cdma.data_state", 1) == 2) {
+                Log.d(LOG_TAG, "Got ril.cdma.data_state=2, connected.");
+                return true;
+            }
+        }
+
+        // Disconnect: Set ril.cdma.data_state=0 to stop pppd_cdma service.
+        Log.d(LOG_TAG, "Didn't get ril.cdma.data_state=2 timely, aborting.");
+        SystemProperties.set("ril.cdma.data_state", "0");
+
+        return false;
+    }
+
+    @Override
+    public void
+    deactivateDataCall(int cid, int reason, Message result) {
+        if (mIsSamsungCdma) {
+            // Disconnect: Set ril.cdma.data_state=0 to stop pppd_cdma service.
+            Log.d(LOG_TAG, "Set ril.cdma.data_state=0.");
+            SystemProperties.set("ril.cdma.data_state", "0");
+        }
+
+        super.deactivateDataCall(cid, reason, result);
+    }
+
+    protected Object
+    responseCdmaSubscription(Parcel p) {
+        String response[] = (String[])responseStrings(p);
+
+        if (/* mIsSamsungCdma && */ response.length == 4) {
+            // PRL version is missing in subscription parcel, add it from properties.
+            String prlVersion = SystemProperties.get("ril.prl_ver_1").split(":")[1];
+            response          = new String[] {response[0], response[1], response[2],
+                                              response[3], prlVersion};
         }
 
         return response;
     }
 
+    // Workaround for Samsung CDMA "ring of death" bug:
+    //
+    // Symptom: As soon as the phone receives notice of an incoming call, an
+    //   audible "old fashioned ring" is emitted through the earpiece and
+    //   persists through the duration of the call, or until reboot if the call
+    //   isn't answered.
+    //
+    // Background: The CDMA telephony stack implements a number of "signal info
+    //   tones" that are locally generated by ToneGenerator and mixed into the
+    //   voice call path in response to radio RIL_UNSOL_CDMA_INFO_REC requests.
+    //   One of these tones, IS95_CONST_IR_SIG_IS54B_L, is requested by the
+    //   radio just prior to notice of an incoming call when the voice call
+    //   path is muted.  CallNotifier is responsible for stopping all signal
+    //   tones (by "playing" the TONE_CDMA_SIGNAL_OFF tone) upon receipt of a
+    //   "new ringing connection", prior to unmuting the voice call path.
+    //
+    // Problem: CallNotifier's incoming call path is designed to minimize
+    //   latency to notify users of incoming calls ASAP.  Thus,
+    //   SignalInfoTonePlayer requests are handled asynchronously by spawning a
+    //   one-shot thread for each.  Unfortunately the ToneGenerator API does
+    //   not provide a mechanism to specify an ordering on requests, and thus,
+    //   unexpected thread interleaving may result in ToneGenerator processing
+    //   them in the opposite order that CallNotifier intended.  In this case,
+    //   playing the "signal off" tone first, followed by playing the "old
+    //   fashioned ring" indefinitely.
+    //
+    // Solution: An API change to ToneGenerator is required to enable
+    //   SignalInfoTonePlayer to impose an ordering on requests (i.e., drop any
+    //   request that's older than the most recent observed).  Such a change,
+    //   or another appropriate fix should be implemented in AOSP first.
+    //
+    // Workaround: Intercept RIL_UNSOL_CDMA_INFO_REC requests from the radio,
+    //   check for a signal info record matching IS95_CONST_IR_SIG_IS54B_L, and
+    //   drop it so it's never seen by CallNotifier.  If other signal tones are
+    //   observed to cause this problem, they should be dropped here as well.
     @Override
-    public void
-    supplyIccPinForApp(String pin, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_ENTER_SIM_PIN, result);
+    protected void
+    notifyRegistrantsCdmaInfoRec(CdmaInformationRecords infoRec) {
+        final int response = RIL_UNSOL_CDMA_INFO_REC;
 
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+        if (/* mIsSamsungCdma && */ infoRec.record instanceof CdmaSignalInfoRec) {
+            CdmaSignalInfoRec sir = (CdmaSignalInfoRec)infoRec.record;
+            if (sir != null && sir.isPresent &&
+                sir.signalType == SignalToneUtil.IS95_CONST_IR_SIGNAL_IS54B &&
+                sir.alertPitch == SignalToneUtil.IS95_CONST_IR_ALERT_MED    &&
+                sir.signal     == SignalToneUtil.IS95_CONST_IR_SIG_IS54B_L) {
 
-        rr.mp.writeInt(1);
-        rr.mp.writeString(pin);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    supplyIccPin2ForApp(String pin, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_ENTER_SIM_PIN2, result);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        rr.mp.writeInt(1);
-        rr.mp.writeString(pin);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    supplyIccPukForApp(String puk, String newPin, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_ENTER_SIM_PUK, result);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        rr.mp.writeInt(2);
-        rr.mp.writeString(puk);
-        rr.mp.writeString(newPin);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    supplyIccPuk2ForApp(String puk, String newPin2, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_ENTER_SIM_PUK2, result);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        rr.mp.writeInt(2);
-        rr.mp.writeString(puk);
-        rr.mp.writeString(newPin2);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    changeIccPinForApp(String oldPin, String newPin, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_CHANGE_SIM_PIN, result);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        rr.mp.writeInt(2);
-        rr.mp.writeString(oldPin);
-        rr.mp.writeString(newPin);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    changeIccPin2ForApp(String oldPin2, String newPin2, String aid, Message result) {
-        //Note: This RIL request has not been renamed to ICC,
-        //       but this request is also valid for SIM and RUIM
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_CHANGE_SIM_PIN2, result);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        rr.mp.writeInt(2);
-        rr.mp.writeString(oldPin2);
-        rr.mp.writeString(newPin2);
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    queryFacilityLockForApp(String facility, String password, int serviceClass, String appId,
-                            Message response) {
-        RILRequest rr = RILRequest.obtain(RIL_REQUEST_QUERY_FACILITY_LOCK, response);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        // count strings
-        rr.mp.writeInt(3);
-
-        rr.mp.writeString(facility);
-        rr.mp.writeString(password);
-
-        rr.mp.writeString(Integer.toString(serviceClass));
-
-        send(rr);
-    }
-
-    @Override
-    public void
-    setFacilityLockForApp(String facility, boolean lockState, String password,
-                          int serviceClass, String appId, Message response) {
-        String lockString;
-        RILRequest rr =
-            RILRequest.obtain(RIL_REQUEST_SET_FACILITY_LOCK, response);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
-
-        // count strings
-        rr.mp.writeInt(4);
-
-        rr.mp.writeString(facility);
-        lockString = lockState ? "1" : "0";
-        rr.mp.writeString(lockString);
-        rr.mp.writeString(password);
-        rr.mp.writeString(Integer.toString(serviceClass));
-
-        send(rr);
-    }
-
-    @Override
-    protected Object
-    responseIccCardStatus(Parcel p) {
-        IccCardApplication ca;
-
-        IccCardStatus status = new IccCardStatus();
-        status.setCardState(p.readInt());
-        status.setUniversalPinState(p.readInt());
-        status.setGsmUmtsSubscriptionAppIndex(p.readInt());
-        status.setCdmaSubscriptionAppIndex(p.readInt());
-
-        int numApplications = p.readInt();
-
-        // limit to maximum allowed applications
-        if (numApplications > IccCardStatus.CARD_MAX_APPS) {
-            numApplications = IccCardStatus.CARD_MAX_APPS;
+                Log.d(LOG_TAG, "Dropping \"" + responseToString(response) + " " +
+                      retToString(response, sir) + "\" to prevent \"ring of death\" bug.");
+                return;
+            }
         }
-        status.setNumApplications(numApplications);
 
-        for (int i = 0 ; i < numApplications ; i++) {
-            ca = new IccCardApplication();
-            ca.app_type       = ca.AppTypeFromRILInt(p.readInt());
-            ca.app_state      = ca.AppStateFromRILInt(p.readInt());
-            ca.perso_substate = ca.PersoSubstateFromRILInt(p.readInt());
-            ca.aid            = p.readString();
-            ca.app_label      = p.readString();
-            ca.pin1_replaced  = p.readInt();
-            ca.pin1           = ca.PinStateFromRILInt(p.readInt());
-            ca.pin2           = ca.PinStateFromRILInt(p.readInt());
-            status.addApplication(ca);
-        }
-        return status;
+        super.notifyRegistrantsCdmaInfoRec(infoRec);
     }
 
     protected class SamsungDriverCall extends DriverCall {
@@ -1044,6 +1049,20 @@ public class SamsungRIL extends RIL implements CommandsInterface {
             + namePresentation;
         }
     }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void setCurrentPreferredNetworkType() {
+        if (RILJ_LOGD) riljLog("setCurrentPreferredNetworkType IGNORED");
+        /* Google added this as a fix for crespo loosing network type after
+         * taking an OTA. This messes up the data connection state for us
+         * due to the way we handle network type change (disable data
+         * then change then re-enable).
+         */
+    }
+
     @Override
     public void setPreferredNetworkType(int networkType , Message response) {
         /* Samsung modem implementation does bad things when a datacall is running
